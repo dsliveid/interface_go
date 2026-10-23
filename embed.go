@@ -6,3 +6,9 @@ import "embed"
 //
 //go:embed all:web
 var webFS embed.FS
+
+// appIconICO 内嵌程序图标（深色底 + 绿色菱形，与页面头部品牌标识一致）。
+// 托盘图标直接用它在内存中创建 HICON；exe 文件图标由 rsrc 生成的 .syso 提供同一份图案。
+//
+//go:embed assets/app.ico
+var appIconICO []byte

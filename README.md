@@ -19,17 +19,38 @@
 1. 在 `127.0.0.1` 上选一个空闲端口启动本地服务（不对外监听，不占固定端口）
 2. 用系统自带的 Edge / Chrome 以 **App 模式**打开一个无地址栏的独立窗口
 3. 在 exe 同级创建 `data` 目录
+4. 在任务栏通知区放一个托盘图标（程序生命周期由它管理）
 
 > 找不到 Edge/Chrome 时会退化为默认浏览器打开，功能完全一致。
+
+### 如何退出程序（重要）
+
+程序是「常驻托盘」型工具：**关闭浏览器窗口不会退出程序**，它会继续在后台运行。
+
+退出方式（任选其一）：
+
+| 方式 | 操作 |
+| --- | --- |
+| 托盘菜单（推荐） | 右键任务栏通知区的托盘图标 → **退出**。图标看不到时点任务栏的 `^` 展开 |
+| 再次双击 exe | 弹出确认框 → 点 **否(N)** 即退出正在运行的程序（点「是」则打开主界面） |
+| 任务管理器 | 结束「接口工具.exe」（不推荐，会跳过正常清理流程） |
+
+退出时会一并关闭它拉起的浏览器窗口及其全部子进程，并清理 `data/port.txt`。
 
 ### 命令行参数
 
 | 参数 | 说明 |
 | --- | --- |
 | `-port 9527` | 指定端口（默认随机；被占用时自动换随机端口） |
-| `-no-browser` | 只启动服务，不自动开窗口（配合浏览器手动访问） |
+| `-no-browser` | 不自动开窗口（托盘仍然生效，便于只开界面或调试） |
+| `-no-tray` | 不创建托盘、不做单实例互斥，退化为纯 HTTP 服务（调试/自动化用，Ctrl+C 退出） |
 | `-data D:\xx\data` | 指定数据目录（默认 exe 同级 `data`） |
 | `-version` | 打印版本号 |
+
+程序为**单实例**：已经运行时再次双击，不会启动第二个后台进程，而是弹出确认框让你选择打开主界面或退出已有程序。
+
+> 浏览器使用独立的配置目录（`%TEMP%\interface-go-browser`），因此不会被系统里已开的浏览器窗口「接管」，
+> 这也保证了退出时能把它拉起的全部浏览器进程干净回收。
 
 ---
 
@@ -132,26 +153,69 @@ data/
 
 ---
 
-## 四、从源码构建
+## 四、启动与打包脚本
+
+需要 Go 1.25+（无需 Node / Rust / 任何前端工具链）。脚本为 `sh` 语法，Windows 下用 **Git Bash** 执行，Linux/macOS 直接执行。
+
+### run.sh —— 开发期启动（不产出 exe）
 
 ```bash
-# 需要 Go 1.25+，无需 Node / Rust / 任何前端工具链
-go build -o 接口工具.exe .
+./run.sh                  # 启动本地服务并自动拉起 Edge/Chrome 独立窗口
+./run.sh -no-browser      # 只启动服务，手动用浏览器访问
+./run.sh -port 9527       # 固定端口（被占用时自动换随机端口）
+./run.sh -data ./tmpdata  # 指定数据目录
+./run.sh -version         # 打印版本号后退出
 ```
 
-无控制台窗口（更像个桌面应用）的版本：
+参数会原样透传给程序本体；`go run` 的临时 exe 会被识别并回退到源码目录，所以开发期数据仍落在项目根目录的 `data/`。
+
+### build.sh —— 打包单文件可执行程序
 
 ```bash
-go build -ldflags "-H=windowsgui -s -w" -o 接口工具.exe .
+./build.sh                    # 按当前平台打包（Windows 自动隐藏控制台窗口）
+./build.sh -v 1.2.0           # 指定版本号（默认 1.0.0+<git 短哈希>，有改动时加 -dirty）
+./build.sh -o dist/app.exe    # 指定输出路径（目录不存在会自动创建）
+./build.sh --console          # 保留控制台窗口（调试 -version / 日志时用）
+./build.sh --strip            # 剥离符号表与源码路径（产物更小，但可分析性差）
+./build.sh --skip-check       # 跳过 go vet 静态检查，加快打包
+GOOS=linux GOARCH=arm64 ./build.sh   # 交叉编译到其他平台
 ```
 
-产物约 10 MB，前端资源已通过 `//go:embed` 打入二进制，**拷走一个 exe 即可运行**。
+脚本内固定使用 `CGO_ENABLED=0`，并把版本号通过 `-X main.version` 注入（`接口工具.exe -version` 可查看）。Windows/amd64 目标会依次做三件事：
+
+1. `go run ./tools/winres` 重建资源对象（图标 + 版本信息 + 应用清单）；
+2. 追加 `-H=windowsgui` 隐藏黑窗后编译；
+3. `go run ./tools/winres -fixexe` 把 PE 时间戳改成真实构建时间、按规范重算校验和。
+
+**默认不剥符号**（不加 `-s -w -trimpath`）：产物约 10 MB，但保留符号表与 DWARF 调试信息。
+剥符号后的「不可读高熵二进制」是杀软启发式判定的典型减分项，用几 MB 体积换可分析性是划算的；
+确实需要 6.9 MB 左右的小体积时再加 `--strip`。
+
+手工等价命令：
+
+```bash
+go run ./tools/winres -version 1.0.0            # 生成资源对象
+go build -ldflags "-H=windowsgui -X main.version=1.0.0" -o 接口工具.exe .
+go run ./tools/winres -fixexe 接口工具.exe       # 修正 PE 时间戳与校验和
+```
 
 ### 项目结构
 
 ```
-main.go                    启动本地服务、选端口、拉起窗口、日志与错误弹窗
-embed.go                   内嵌 web 目录
+main.go                    启动本地服务、选端口、单实例互斥、拉起窗口、统一退出编排、日志与错误弹窗
+embed.go                   内嵌 web 目录 + 程序图标 assets/app.ico
+tray_windows.go            系统托盘（Win32 Shell_NotifyIcon：双击打开、右键菜单、气泡提示）
+tray_other.go              非 Windows 平台的托盘 stub
+sys_windows.go             Win32 封装：命名互斥量、Job Object、ShellExecute、内存 HICON
+sys_other.go               非 Windows 平台的 Win32 stub
+messagebox_windows.go      原生错误弹窗 / 「是·否」确认框
+assets/app.ico             程序图标（深色底 + 绿色菱形，与页面头部品牌标识一致）
+rsrc_windows_amd64.syso    exe 资源对象：图标 + 版本信息 + 应用清单（由 tools/winres 生成）
+tools/genicon/main.go      图标生成器（go run ./tools/genicon 可重新生成 app.ico）
+tools/winres/main.go       资源生成器（图标/VERSIONINFO/MANIFEST 打包成 .syso）+ PE 头修正
+tools/winres/coff.go       COFF 对象打包与 PE 时间戳/校验和计算
+run.sh                     开发期启动脚本（go run，参数透传）
+build.sh                   打包脚本（资源生成 + 版本注入 + 隐藏控制台 + 单文件产物）
 internal/model/model.go    数据结构（接口 / 请求 / 响应 / 副本）
 internal/store/store.go    workspace.json 原子写入 + backup 轮转 + CRUD
 internal/executor/executor.go  真实发送 HTTP 请求、编码识别、响应截断
@@ -167,6 +231,11 @@ web/                       原生 HTML + CSS + JS（无框架、无构建链）
 **双击没反应？**
 查看 `data/app.log`。若目录不可写，程序会弹窗提示并把数据改存到 `%LOCALAPPDATA%\InterfaceGo`。
 
+**在通知区找不到托盘图标？**
+Windows 10/11 会把新注册的托盘图标折叠进 `^` 溢出区，请点击任务栏的 `^` 查看；
+若要长期显示，可把它从溢出区拖到任务栏上（系统设置 → 任务栏 → 选择哪些图标显示在任务栏上）。
+即使图标不可见，也随时可以**再次双击 exe**，在弹窗里选「否」退出程序。
+
 **端口被占用？**
 默认就用随机空闲端口，一般不会冲突。如需固定端口用 `-port xxxx`，冲突时会自动改随机。
 
@@ -181,6 +250,27 @@ web/                       原生 HTML + CSS + JS（无框架、无构建链）
 它们要么需要联外网、要么体积巨大、要么强制安装运行时。本工具只有一个 exe，
 不需要任何额外环境，适合在隔离网、内网服务器、客户现场等场景里随 U 盘使用。
 
+**被杀软报毒（例如「代码混淆器 HEUR:VirTool/Obfuscator.a」）？**
+这是**启发式误报**，不是真的命中病毒特征。Go 静态编译的单文件 exe 天然「半混淆」
+（没有 MSVC 的 Rich 头、字符串表被打散），一旦再叠加「无签名 + 无版本信息 + 剥符号」
+就很容易越过判定阈值。本项目已按此做过一轮整改：
+
+- 资源节补齐标准四件套（ICON + GROUP_ICON + VERSIONINFO + MANIFEST），
+  不再出现「有图标却没有版本信息」这种换皮样本的典型形态；
+- 图标资源里不再打包 PNG 压缩条目，资源节内没有高熵压缩块；
+- 默认不剥符号（保留 `.symtab` 与 DWARF），不再是「不可读的二进制」；
+- PE 时间戳与校验和写回真实值，不再是 0；
+- 去掉 `taskkill` / `rundll32` 等可疑命令行字符串，浏览器配置目录改到 `%LOCALAPPDATA%`。
+
+若目标机仍然报毒，按这个顺序处理：
+
+1. 把产物加入杀软的信任区 / 白名单（内部工具最省事的做法）；
+2. 向厂商提交误报样本 + SHA256 + 源码说明，申请加白；
+3. 对外分发场景应做代码签名：隔离网可自建 CA 并把根证书导入目标机，公网分发建议购买 OV 证书；
+4. 需要复现旧产物的 `./build.sh --strip` 做 A/B 对照，验证是哪个特征触发的。
+
+⚠️ 千万不要用 UPX 等加壳工具"规避"查杀——那会把概率性的误报变成确定的「加壳木马」判定。
+
 ---
 
 ## 六、已知边界
@@ -189,3 +279,5 @@ web/                       原生 HTML + CSS + JS（无框架、无构建链）
 - 不支持文件上传（form-data 仅文本字段）
 - 不做环境变量替换（不同环境的地址请直接改 URL，或用「复制接口」区分）
 - 响应体 > 5MB 会截断保存
+- 托盘图标由 Windows Shell 负责显示，个别系统会把新图标折叠进 `^` 溢出区（详见常见问题）
+- 用任务管理器强杀进程时，可能残留一个「幽灵」托盘图标（鼠标划过即消失，Windows 通病）

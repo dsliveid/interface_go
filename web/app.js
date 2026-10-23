@@ -29,6 +29,22 @@ const state = {
 
 /* ============ 基础工具 ============ */
 
+// 深拷贝纯数据结构（不依赖 structuredClone，兼容旧版 Edge/Chrome 内核）
+function deepClone(v) {
+  if (v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) {
+    const arr = new Array(v.length);
+    for (let i = 0; i < v.length; i++) arr[i] = deepClone(v[i]);
+    return arr;
+  }
+  if (v instanceof Date) return new Date(v.getTime());
+  const out = {};
+  for (const k in v) {
+    if (Object.prototype.hasOwnProperty.call(v, k)) out[k] = deepClone(v[k]);
+  }
+  return out;
+}
+
 async function api(path, options = {}) {
   const opts = { ...options };
   if (opts.body) opts.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -46,13 +62,14 @@ async function api(path, options = {}) {
 }
 
 let toastTimer = null;
-function toast(msg, isErr) {
+function toast(msg, isErr, duration) {
   const el = $('toast');
   el.textContent = msg;
   el.classList.toggle('err', !!isErr);
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, isErr ? 4600 : 2200);
+  const ms = duration || (isErr ? 4600 : 2200);
+  toastTimer = setTimeout(() => { el.hidden = true; }, ms);
 }
 
 function promptModal(title, fields, okText) {
@@ -424,7 +441,7 @@ async function openInterface(id) {
   if (state.view === 'editor' && state.currentId === id) return;
   if (!confirmLeave()) return;
   state.currentId = id;
-  state.draft = structuredClone(it);
+  state.draft = deepClone(it);
   state.snapshot = null;
   state.view = 'editor';
   state.dirty = false;
@@ -689,8 +706,8 @@ async function openSnapshot(ifaceId, sid) {
     name: snap.name || '',
     note: snap.note || '',
     group: iface ? iface.group || '' : '',
-    request: structuredClone(snap.request || blankRequest()),
-    response: snap.response ? structuredClone(snap.response) : null,
+    request: deepClone(snap.request || blankRequest()),
+    response: snap.response ? deepClone(snap.response) : null,
     doc: snap.doc || '',
     createdAt: snap.createdAt || Date.now(),
     snapshots: [],
@@ -988,8 +1005,33 @@ function bindEvents() {
 
 /* ============ 启动 ============ */
 
+// 3 秒心跳：只让后端知道「页面窗口是否还开着」，供托盘判断要不要重复开窗。
+// 心跳绝不会导致程序退出 —— 退出统一由托盘右键菜单「退出」控制。
+function startHeartbeat() {
+  const ping = () => {
+    fetch('/api/ping', { cache: 'no-store' }).catch(() => {});
+  };
+  ping();
+  setInterval(ping, 3000);
+}
+
+const TRAY_HINT_KEY = 'interface-go.tray-hint-shown';
+
+// 首次运行时提示一次「关窗口不等于退出程序」，避免用户找不到退出入口。
+function showTrayHintOnce() {
+  try {
+    if (localStorage.getItem(TRAY_HINT_KEY)) return;
+    localStorage.setItem(TRAY_HINT_KEY, '1');
+  } catch (_) {
+    return; // 隐私模式等 localStorage 不可用时静默跳过
+  }
+  toast('提示：关闭窗口不会退出程序，程序会继续在系统托盘运行；双击托盘图标可重新打开窗口，右键菜单可退出。若看不到图标，请点击任务栏右下角的 ^ 展开。', false, 12000);
+}
+
 async function boot() {
   bindEvents();
+  startHeartbeat();
+  showTrayHintOnce();
   try {
     await reload();
   } catch (err) {

@@ -325,7 +325,7 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; color: 
 
 /* ---------- 弹窗 ---------- */
 .modal-mask {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0, 0, 0, .55);
   display: flex; align-items: center; justify-content: center; z-index: 100;
 }
 .modal {
@@ -352,7 +352,7 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; color: 
   position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%);
   background: #33333a; border: 1px solid var(--border); color: var(--text);
   padding: 9px 18px; border-radius: 5px; box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
-  z-index: 200; max-width: 70vw;
+  z-index: 200; max-width: 70vw; line-height: 1.5; text-align: center;
 }
 .toast.err { border-color: #6b3030; background: #3a2626; }
 
