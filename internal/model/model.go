@@ -75,10 +75,42 @@ type Interface struct {
 	Snapshots []Snapshot `json:"snapshots"`
 }
 
-// Workspace 是整个数据文件的根。
+// Workspace 是单个工作空间的数据文件内容。
 type Workspace struct {
 	Version    int          `json:"version"`
 	Interfaces []*Interface `json:"interfaces"`
+}
+
+// DefaultWorkspaceName 是迁移与首次初始化时使用的空间名。
+const DefaultWorkspaceName = "默认工作空间"
+
+// WorkspaceMeta 是工作空间的清单信息（不含接口正文）。
+type WorkspaceMeta struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Count     int    `json:"count"`
+}
+
+// WorkspaceIndex 是 data/index.json 的结构，记录全部空间清单与当前选中空间。
+type WorkspaceIndex struct {
+	Version    int             `json:"version"`
+	Current    string          `json:"current"`
+	Workspaces []WorkspaceMeta `json:"workspaces"`
+}
+
+// Bundle 是「导出全部空间」的打包结构。
+type Bundle struct {
+	Version    int               `json:"version"`
+	ExportedAt int64             `json:"exportedAt"`
+	Workspaces []WorkspaceBundle `json:"workspaces"`
+}
+
+// WorkspaceBundle 是包里单个空间的内容。
+type WorkspaceBundle struct {
+	Meta WorkspaceMeta `json:"meta"`
+	Data Workspace     `json:"data"`
 }
 
 // NewRequest 返回带默认值的请求配置。

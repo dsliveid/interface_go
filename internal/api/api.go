@@ -80,7 +80,16 @@ func New(st *store.Store, static fs.FS, opt Options) http.Handler {
 	mux.HandleFunc("POST /api/open-window", s.openWindow)
 	mux.HandleFunc("POST /api/quit", s.quit)
 	mux.HandleFunc("GET /api/workspace", s.workspace)
+	mux.HandleFunc("GET /api/workspaces", s.listWorkspaces)
+	mux.HandleFunc("POST /api/workspaces", s.createWorkspace)
+	mux.HandleFunc("PUT /api/workspaces/{wsid}", s.renameWorkspace)
+	mux.HandleFunc("DELETE /api/workspaces/{wsid}", s.deleteWorkspace)
+	mux.HandleFunc("GET /api/workspaces/{wsid}", s.getWorkspace)
+	mux.HandleFunc("POST /api/workspaces/{wsid}/switch", s.switchWorkspace)
+	mux.HandleFunc("POST /api/workspaces/{wsid}/import", s.importToWorkspace)
+	mux.HandleFunc("POST /api/workspaces/import-new", s.importNewWorkspace)
 	mux.HandleFunc("POST /api/interfaces", s.createInterface)
+	mux.HandleFunc("POST /api/interfaces/copy", s.copyInterfaces)
 	mux.HandleFunc("PUT /api/interfaces/{id}", s.updateInterface)
 	mux.HandleFunc("DELETE /api/interfaces/{id}", s.deleteInterface)
 	mux.HandleFunc("POST /api/interfaces/{id}/duplicate", s.duplicateInterface)
@@ -90,6 +99,7 @@ func New(st *store.Store, static fs.FS, opt Options) http.Handler {
 	mux.HandleFunc("DELETE /api/interfaces/{id}/snapshots/{sid}", s.deleteSnapshot)
 	mux.HandleFunc("POST /api/execute", s.execute)
 	mux.HandleFunc("GET /api/export", s.export)
+	mux.HandleFunc("GET /api/export/all", s.exportAll)
 	mux.HandleFunc("POST /api/import", s.importData)
 
 	mux.Handle("/", http.FileServer(http.FS(static)))
@@ -163,15 +173,161 @@ func (s *Server) quit(w http.ResponseWriter, _ *http.Request) {
 	}()
 }
 
-func (s *Server) workspace(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) workspacePayload() map[string]interface{} {
 	ws := s.st.Snapshot()
+	metas, cur := s.st.Workspaces()
+	return map[string]interface{}{
+		"version":    ws.Version,
+		"interfaces": ws.Interfaces,
+		"methods":    model.Methods,
+		"dataDir":    s.st.Dir(),
+		"dataFile":   s.st.File(),
+		"current":    cur,
+		"workspaces": metas,
+	}
+}
+
+func (s *Server) workspace(w http.ResponseWriter, _ *http.Request) {
+	ok(w, s.workspacePayload())
+}
+
+// listWorkspaces 返回空间清单与当前空间。
+func (s *Server) listWorkspaces(w http.ResponseWriter, _ *http.Request) {
+	metas, cur := s.st.Workspaces()
+	ok(w, map[string]interface{}{
+		"current":    cur,
+		"workspaces": metas,
+	})
+}
+
+func (s *Server) createWorkspace(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		fail(w, http.StatusBadRequest, "请求数据格式错误")
+		return
+	}
+	meta, err := s.st.CreateWorkspace(in.Name)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	ok(w, meta)
+}
+
+func (s *Server) renameWorkspace(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		fail(w, http.StatusBadRequest, "请求数据格式错误")
+		return
+	}
+	meta, err := s.st.RenameWorkspace(r.PathValue("wsid"), in.Name)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	ok(w, meta)
+}
+
+func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteWorkspace(r.PathValue("wsid")); err != nil {
+		handleErr(w, err)
+		return
+	}
+	ok(w, nil)
+}
+
+// getWorkspace 返回指定空间的全量数据（不切换当前空间）。
+func (s *Server) getWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("wsid")
+	ws, err := s.st.SnapshotOf(id)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	metas, cur := s.st.Workspaces()
 	ok(w, map[string]interface{}{
 		"version":    ws.Version,
 		"interfaces": ws.Interfaces,
 		"methods":    model.Methods,
 		"dataDir":    s.st.Dir(),
 		"dataFile":   s.st.File(),
+		"current":    cur,
+		"workspaces": metas,
+		"wsid":       id,
 	})
+}
+
+func (s *Server) switchWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("wsid")
+	if err := s.st.SetCurrent(id); err != nil {
+		handleErr(w, err)
+		return
+	}
+	payload := s.workspacePayload()
+	payload["wsid"] = id
+	ok(w, payload)
+}
+
+// importToWorkspace 覆盖导入到指定空间。
+func (s *Server) importToWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("wsid")
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	defer r.Body.Close()
+	if err != nil {
+		fail(w, http.StatusBadRequest, "读取导入内容失败")
+		return
+	}
+	if err := s.st.ImportTo(id, b); err != nil {
+		handleErr(w, err)
+		return
+	}
+	ws, _ := s.st.SnapshotOf(id)
+	ok(w, map[string]interface{}{"imported": len(ws.Interfaces), "targetWorkspaceId": id})
+}
+
+// importNewWorkspace 新建空间并导入，随后切换为当前空间。
+func (s *Server) importNewWorkspace(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string          `json:"name"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		fail(w, http.StatusBadRequest, "请求数据格式错误")
+		return
+	}
+	if len(in.Data) == 0 {
+		fail(w, http.StatusBadRequest, "导入内容为空")
+		return
+	}
+	meta, err := s.st.ImportNewWorkspace(in.Name, in.Data)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	ok(w, meta)
+}
+
+// copyInterfaces 批量复制接口到其他空间的分组。
+func (s *Server) copyInterfaces(w http.ResponseWriter, r *http.Request) {
+	var in store.CopyRequest
+	if err := decodeBody(r, &in); err != nil {
+		fail(w, http.StatusBadRequest, "请求数据格式错误")
+		return
+	}
+	if len(in.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "请先选择要复制的接口")
+		return
+	}
+	res, err := s.st.CopyInterfaces(in)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	ok(w, res)
 }
 
 func (s *Server) createInterface(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +465,19 @@ func (s *Server) export(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// exportAll 导出全部工作空间。
+func (s *Server) exportAll(w http.ResponseWriter, _ *http.Request) {
+	b, err := s.st.ExportAll()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="interfaces-all-workspaces.json"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
 func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	b, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	defer r.Body.Close()
@@ -326,6 +495,14 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 func handleErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		fail(w, http.StatusNotFound, "数据不存在，可能已被删除")
+		return
+	}
+	if errors.Is(err, store.ErrBadWorkspace) {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, store.ErrLastWorkspace) {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	fail(w, http.StatusInternalServerError, err.Error())

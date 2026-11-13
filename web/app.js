@@ -14,6 +14,9 @@ const state = {
   interfaces: [],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'TRACE'],
   dataDir: '',
+  current: '',           // 当前工作空间 id
+  workspaces: [],        // 空间清单 meta 列表
+  selected: new Set(),   // 批量操作选中的接口 id
   currentId: null,
   draft: null,
   view: 'empty', // empty | editor | snapshot
@@ -191,11 +194,70 @@ function confirmLeave() {
 
 async function reload() {
   const ws = await api('/workspace');
-  state.interfaces = ws.interfaces || [];
+  applyWorkspaceData(ws);
+}
+
+// dedupeIfaceSnapshots 按副本 ID 去重（防御历史脏数据导致树上出现两个同名副本）。
+function dedupeIfaceSnapshots(it) {
+  if (!it || !Array.isArray(it.snapshots) || it.snapshots.length < 2) return it;
+  const seen = new Set();
+  it.snapshots = it.snapshots.filter((s) => {
+    if (!s || !s.id) return true;
+    if (seen.has(s.id)) return false;
+    seen.add(s.id);
+    return true;
+  });
+  return it;
+}
+
+// 把「空间全量数据」响应（/api/workspace、/api/workspaces/{id}、switch 等返回体）灌入 state。
+// 三处接口返回结构一致，统一复用，避免字段散落。
+function applyWorkspaceData(ws) {
+  if (!ws) return;
+  state.interfaces = (ws.interfaces || []).map(dedupeIfaceSnapshots);
   state.methods = ws.methods || state.methods;
   state.dataDir = ws.dataDir || '';
+  state.current = ws.current || '';
+  state.workspaces = Array.isArray(ws.workspaces) ? ws.workspaces : [];
+  state.selected.clear();
   $('dataDir').textContent = ws.dataDir ? '数据：' + ws.dataDir : '';
   $('dataDir').title = ws.dataFile || '';
+  renderWsSwitcher();
+  renderBulkBar();
+}
+
+// 只刷新空间清单与当前空间标记（不动当前空间的接口数据）
+async function refreshWorkspaces() {
+  const d = await api('/workspaces');
+  state.current = d.current || state.current;
+  state.workspaces = Array.isArray(d.workspaces) ? d.workspaces : [];
+  renderWsSwitcher();
+  return d;
+}
+
+function wsName(id) {
+  const m = state.workspaces.find((w) => w.id === id);
+  return m ? m.name : id;
+}
+
+function renderWsSwitcher() {
+  const sel = $('wsSwitcher');
+  if (!sel) return;
+  sel.innerHTML = state.workspaces
+    .map((w) => '<option value="' + esc(w.id) + '">' + esc(w.name + ' (' + (w.count || 0) + ')') + '</option>')
+    .join('');
+  if (state.current) sel.value = state.current;
+}
+
+// 切换空间 / 导入 / 删除空间后统一清空编辑态
+function resetEditing() {
+  state.currentId = null;
+  state.draft = null;
+  state.snapshot = null;
+  state.view = 'empty';
+  state.dirty = false;
+  state.collapsed.clear();
+  state.selected.clear();
 }
 
 function visibleInterfaces() {
@@ -211,9 +273,15 @@ function visibleInterfaces() {
 
 function renderTree() {
   const tree = $('tree');
+  // 清理已不存在的选择项，避免「已选 N 项」与列表不一致
+  if (state.selected.size) {
+    const alive = new Set(state.interfaces.map((it) => it.id));
+    [...state.selected].forEach((id) => { if (!alive.has(id)) state.selected.delete(id); });
+  }
   const list = visibleInterfaces();
   if (!list.length) {
     tree.innerHTML = '<div class="tree-empty">' + (state.interfaces.length ? '没有匹配的接口' : '暂无接口<br>点击左上角「＋ 新建接口」开始') + '</div>';
+    renderBulkBar();
     return;
   }
   const groups = new Map();
@@ -233,8 +301,11 @@ function renderTree() {
   names.forEach((g) => {
     const items = groups.get(g).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     const collapsed = state.collapsed.has(g);
+    const pickedInGroup = items.filter((it) => state.selected.has(it.id)).length;
+    const allPicked = items.length > 0 && pickedInGroup === items.length;
     html += '<div class="group">';
     html += '<div class="group-head" data-group="' + esc(g) + '">';
+    html += '<input type="checkbox" class="pick" data-pick-group="' + esc(g) + '"' + (allPicked ? ' checked' : '') + ' />';
     html += '<span class="caret">' + (collapsed ? '▶' : '▼') + '</span>';
     html += '<span class="gname">' + esc(g) + '</span>';
     html += '<span class="gcount">' + items.length + '</span>';
@@ -246,6 +317,7 @@ function renderTree() {
       const method = (it.request && it.request.method) || 'GET';
       const snapCount = (it.snapshots || []).length;
       html += '<div class="node' + (active ? ' active' : '') + '" data-id="' + it.id + '">';
+      html += '<input type="checkbox" class="pick" data-pick-id="' + it.id + '"' + (state.selected.has(it.id) ? ' checked' : '') + ' />';
       html += '<span class="m ' + esc(method) + '">' + esc(method) + '</span>';
       html += '<span class="n" title="' + esc((it.request && it.request.url) || '') + '">' + esc(it.name || '未命名接口') + '</span>';
       if (snapCount) html += '<span class="snapcount">' + snapCount + ' 副本</span>';
@@ -264,6 +336,30 @@ function renderTree() {
     html += '</div>';
   });
   tree.innerHTML = html;
+  indeterminateApply();
+  renderBulkBar();
+}
+
+// 半选状态只能通过 DOM 属性设置（HTML 无 indeterminate 属性）
+function indeterminateApply() {
+  $('tree').querySelectorAll('[data-pick-group]').forEach((box) => {
+    const g = box.dataset.pickGroup;
+    const items = visibleInterfaces().filter((it) => ((it.group || '').trim() || '未分组') === g);
+    const picked = items.filter((it) => state.selected.has(it.id)).length;
+    box.indeterminate = picked > 0 && picked < items.length;
+  });
+}
+
+// 批量操作条：已选数量 / 全选切换 / 复制按钮可用性
+function renderBulkBar() {
+  const n = state.selected.size;
+  const bar = $('bulkBar');
+  if (!bar) return;
+  $('bulkCount').textContent = '已选 ' + n + ' 项';
+  $('btnCopyTo').disabled = n === 0;
+  const visible = visibleInterfaces();
+  const allPicked = visible.length > 0 && visible.every((it) => state.selected.has(it.id));
+  $('btnSelectAll').textContent = allPicked ? '取消全选' : '全选';
 }
 
 function renderFoot() {
@@ -562,6 +658,7 @@ async function deleteInterface() {
   if (!go) return;
   await api('/interfaces/' + state.draft.id, { method: 'DELETE' });
   state.interfaces = state.interfaces.filter((x) => x.id !== state.draft.id);
+  state.selected.delete(state.draft.id);
   state.draft = null;
   state.currentId = null;
   state.view = 'empty';
@@ -682,12 +779,14 @@ async function saveSnapshot() {
       response: resp,
     }),
   });
-  // 先把当前编辑内容（含出参）落库，再同步树
+  // 先把当前编辑内容（含出参）落库，再同步树。
+  // 注意：saveInterface 会把服务器返回的接口整份写回 state（其中已包含刚创建的副本），
+  // 所以这里只能补挂缺失的副本，绝不能无条件 push，否则同一副本会在树上出现两次。
   await saveInterface(true);
   const it = state.interfaces.find((x) => x.id === state.draft.id);
   if (it) {
     it.snapshots = it.snapshots || [];
-    it.snapshots.push(snap);
+    if (snap && snap.id && !it.snapshots.some((s) => s.id === snap.id)) it.snapshots.push(snap);
     state.draft.snapshots = it.snapshots;
   }
   renderAll();
@@ -718,6 +817,180 @@ async function openSnapshot(ifaceId, sid) {
   fillEditor();
 }
 
+/* ============ 工作空间 ============ */
+
+// 切换空间：有未保存修改先确认；成功后整份数据重灌并重渲染。
+async function switchWorkspace(id) {
+  if (!id || id === state.current) {
+    renderWsSwitcher();
+    return;
+  }
+  if (!confirmLeave()) {
+    renderWsSwitcher(); // 复原下拉选中项
+    return;
+  }
+  await loadWorkspace(id);
+  toast('已切换到空间「' + wsName(state.current) + '」');
+}
+
+// 拉取指定空间全量数据并整体重渲染（switch 用）
+async function loadWorkspace(id) {
+  const data = await api('/workspaces/' + encodeURIComponent(id) + '/switch', { method: 'POST' });
+  resetEditing();
+  applyWorkspaceData(data);
+  renderAll();
+  if (state.interfaces.length) await openInterface(state.interfaces[0].id);
+  else resetResponse();
+}
+
+async function createWorkspace() {
+  const fields = await promptModal('新建工作空间', [
+    { name: 'name', label: '空间名称', value: '工作空间-' + state.workspaces.length },
+  ], '创建');
+  if (!fields) return;
+  const meta = await api('/workspaces', { method: 'POST', body: JSON.stringify({ name: fields.name }) });
+  await refreshWorkspaces();
+  await switchWorkspace(meta.id);
+}
+
+async function renameCurrentWorkspace() {
+  const id = state.current;
+  if (!id) return;
+  const fields = await promptModal('重命名工作空间', [
+    { name: 'name', label: '新名称', value: wsName(id) },
+  ], '保存');
+  if (!fields) return;
+  await api('/workspaces/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ name: fields.name }) });
+  await refreshWorkspaces();
+  toast('空间已重命名为「' + wsName(id) + '」');
+}
+
+async function deleteCurrentWorkspace() {
+  const id = state.current;
+  if (!id) return;
+  if (state.workspaces.length <= 1) {
+    toast('不能删除最后一个工作空间，请先新建一个空间', true);
+    return;
+  }
+  const go = await confirmModal(
+    '删除工作空间',
+    '将删除空间「' + wsName(id) + '」及其全部接口（数据文件会保留在 backup 目录）。确定删除？',
+    '删除',
+  );
+  if (!go) return;
+  await api('/workspaces/' + encodeURIComponent(id), { method: 'DELETE' });
+  // 后端删除当前空间后会自动激活下一个空间，直接重新拉取即可
+  resetEditing();
+  await reload();
+  renderAll();
+  if (state.interfaces.length) await openInterface(state.interfaces[0].id);
+  else resetResponse();
+  toast('已删除该工作空间');
+}
+
+function exportAllWorkspaces() {
+  // 后端直接返回文件下载流，不经过 api() 封装
+  window.open('/api/export/all', '_blank');
+  toast('已导出全部空间');
+}
+
+// 空间管理菜单开关
+function toggleWsMenu(force) {
+  const menu = $('wsMenu');
+  if (!menu) return;
+  const show = force === undefined ? menu.hidden : !!force;
+  menu.hidden = !show;
+}
+
+/* ============ 批量跨空间复制 ============ */
+
+function targetWsOptions(excludeId) {
+  return state.workspaces.filter((w) => w.id !== excludeId);
+}
+
+function toggleSelectAll() {
+  const visible = visibleInterfaces();
+  const allPicked = visible.length > 0 && visible.every((it) => state.selected.has(it.id));
+  if (allPicked) state.selected.clear();
+  else visible.forEach((it) => state.selected.add(it.id));
+  renderTree();
+}
+
+async function openCopyModal() {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  const others = targetWsOptions(state.current);
+  if (!others.length) {
+    toast('只有一个工作空间，请先点顶部「＋」新建一个空间再复制', true, 5000);
+    return;
+  }
+  $('copySummary').textContent = '已选 ' + ids.length + ' 项，将复制到：';
+  $('copyTargetWs').innerHTML = others
+    .map((w) => '<option value="' + esc(w.id) + '">' + esc(w.name + ' (' + (w.count || 0) + ')') + '</option>')
+    .join('');
+  $('copyGroupInputWrap').hidden = true;
+  $('copyGroupInput').value = '';
+  $('copyMask').hidden = false;
+  await fillCopyGroups();
+}
+
+// 目标空间变化时，拉取该空间的分组清单填充下拉
+async function fillCopyGroups() {
+  const wsid = $('copyTargetWs').value;
+  let groups = [];
+  if (wsid) {
+    try {
+      const data = await api('/workspaces/' + encodeURIComponent(wsid));
+      groups = [...new Set((data.interfaces || []).map((it) => (it.group || '').trim()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    } catch (_) {
+      groups = [];
+    }
+  }
+  $('copyGroupSel').innerHTML = [
+    '<option value="__keep__">保留原分组</option>',
+    ...groups.map((g) => '<option value="' + esc(g) + '">' + esc(g) + '</option>'),
+    '<option value="__new__">＋ 输入新分组…</option>',
+  ].join('');
+  $('copyGroupInputWrap').hidden = true;
+}
+
+async function doCopy() {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  const targetWorkspaceId = $('copyTargetWs').value;
+  if (!targetWorkspaceId) {
+    toast('请选择目标空间', true);
+    return;
+  }
+  const sel = $('copyGroupSel').value;
+  let targetGroup = '';
+  if (sel === '__new__') {
+    targetGroup = $('copyGroupInput').value.trim();
+    if (!targetGroup) {
+      toast('请输入新分组名称', true);
+      return;
+    }
+  } else if (sel !== '__keep__') {
+    targetGroup = sel;
+  }
+  $('copyOk').disabled = true;
+  try {
+    const res = await api('/interfaces/copy', {
+      method: 'POST',
+      body: JSON.stringify({ ids, targetWorkspaceId, targetGroup, regenerateId: true }),
+    });
+    $('copyMask').hidden = true;
+    state.selected.clear();
+    await refreshWorkspaces();
+    renderTree();
+    const where = targetGroup ? '分组「' + targetGroup + '」' : '原分组';
+    toast('已复制 ' + (res.copied || ids.length) + ' 个接口到「' + wsName(targetWorkspaceId) + '」' + where);
+  } finally {
+    $('copyOk').disabled = false;
+  }
+}
+
 /* ============ 导入导出 ============ */
 
 function exportBackup() {
@@ -727,21 +1000,85 @@ function exportBackup() {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  toast('已导出备份文件');
+  toast('已导出当前空间备份文件');
 }
 
+// 打开导入弹窗：先解析文件，解析失败直接报错；模式一新建空间，模式二覆盖指定空间。
 async function importBackup(file) {
   const text = await file.text();
-  const go = await confirmModal('导入备份', '导入将覆盖当前全部接口数据（现有数据会自动进入 data/backup 备份）。确定继续？', '覆盖导入');
-  if (!go) return;
-  await api('/import', { method: 'POST', body: text });
-  state.currentId = null;
-  state.draft = null;
-  state.view = 'empty';
-  state.dirty = false;
-  await reload();
-  renderAll();
-  toast('导入完成');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_) {
+    toast('文件不是合法 JSON，无法导入', true);
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    toast('文件内容不是有效的工作区数据', true);
+    return;
+  }
+  // 导入可能切换/覆盖当前空间，先确认放弃未保存的编辑内容
+  if (!confirmLeave()) return;
+  const base = String(file.name || 'backup').replace(/\.[^.]+$/, '');
+  $('impNewName').value = '导入-' + base;
+  $('impFileInfo').textContent = '文件：' + file.name + '（' + (parsed.interfaces || []).length + ' 个接口）';
+  $('impModeNew').checked = true;
+  $('impNewPane').hidden = false;
+  $('impOverPane').hidden = true;
+  $('impTargetWs').innerHTML = state.workspaces
+    .map((w) => '<option value="' + esc(w.id) + '">' + esc(w.name + ' (' + (w.count || 0) + ')') + '</option>')
+    .join('');
+  if (state.current) $('impTargetWs').value = state.current;
+  $('importMask').hidden = false;
+  $('impNewName').focus();
+  $('impNewName').select();
+
+  // 每次打开都重置回调，避免旧的闭包残留
+  $('impOk').onclick = () => doImport(text, parsed).catch((e) => toast(e.message, true));
+  $('impCancel').onclick = () => { $('importMask').hidden = true; };
+}
+
+async function doImport(text, parsed) {
+  const mode = $('impModeOver').checked ? 'overwrite' : 'new';
+  $('impOk').disabled = true;
+  try {
+    if (mode === 'new') {
+      const name = $('impNewName').value.trim() || '导入备份';
+      // data 传解析后的对象（不是字符串），与后端契约一致
+      const meta = await api('/workspaces/import-new', { method: 'POST', body: JSON.stringify({ name, data: parsed }) });
+      $('importMask').hidden = true;
+      // 后端已自动把当前空间切为新空间：先用返回值同步清单，再拉全量数据
+      resetEditing();
+      await reload();
+      renderAll();
+      if (state.interfaces.length) await openInterface(state.interfaces[0].id);
+      else resetResponse();
+      toast('已导入为新工作空间「' + (meta && meta.name ? meta.name : name) + '」');
+      return;
+    }
+    const target = $('impTargetWs').value;
+    if (!target) {
+      toast('请选择目标空间', true);
+      return;
+    }
+    await api('/workspaces/' + encodeURIComponent(target) + '/import', { method: 'POST', body: text });
+    $('importMask').hidden = true;
+    if (target === state.current) {
+      resetEditing();
+      await reload();
+      renderAll();
+      if (state.interfaces.length) await openInterface(state.interfaces[0].id);
+      else resetResponse();
+      toast('已覆盖导入当前空间');
+    } else {
+      // 目标不是当前空间：只更新清单计数，不打扰当前编辑内容
+      await refreshWorkspaces();
+      renderTree();
+      toast('已覆盖导入空间「' + wsName(target) + '」，其他空间未受影响');
+    }
+  } finally {
+    $('impOk').disabled = false;
+  }
 }
 
 /* ============ 事件绑定 ============ */
@@ -849,6 +1186,38 @@ function onEdit(e) {
 
 function onClick(e) {
   const t = e.target;
+
+  // 多选勾选框：优先于分组折叠/接口打开处理，避免点勾选就打开接口
+  if (t.classList && t.classList.contains('pick')) {
+    if (t.dataset.pickId) {
+      const id = t.dataset.pickId;
+      if (t.checked) state.selected.add(id); else state.selected.delete(id);
+      renderTree();
+      return;
+    }
+    if (t.dataset.pickGroup) {
+      const g = t.dataset.pickGroup;
+      const items = visibleInterfaces().filter((it) => ((it.group || '').trim() || '未分组') === g);
+      items.forEach((it) => {
+        if (t.checked) state.selected.add(it.id); else state.selected.delete(it.id);
+      });
+      renderTree();
+      return;
+    }
+  }
+
+  // 空间管理菜单项
+  const wsAct = t.closest('[data-wsact]');
+  if (wsAct) {
+    toggleWsMenu(false);
+    const act = wsAct.dataset.wsact;
+    if (act === 'rename') renameCurrentWorkspace().catch((err) => toast(err.message, true));
+    if (act === 'delete') deleteCurrentWorkspace().catch((err) => toast(err.message, true));
+    if (act === 'exportAll') exportAllWorkspaces();
+    return;
+  }
+  // 点击菜单外部自动收起
+  if (!t.closest('#wsMenu') && !t.closest('#btnWsMenu')) toggleWsMenu(false);
 
   const addBtn = t.closest('[data-add]');
   if (addBtn) {
@@ -960,6 +1329,49 @@ function bindEvents() {
     e.target.value = '';
     if (f) importBackup(f).catch((err) => toast(err.message, true));
   };
+
+  // ---- 工作空间 ----
+  $('wsSwitcher').onchange = (e) => {
+    switchWorkspace(e.target.value).catch((err) => {
+      toast(err.message, true);
+      renderWsSwitcher();
+    });
+  };
+  $('btnNewWorkspace').onclick = () => createWorkspace().catch((err) => toast(err.message, true));
+  $('btnWsMenu').onclick = (e) => {
+    e.stopPropagation();
+    toggleWsMenu();
+  };
+
+  // ---- 导入弹窗模式切换 ----
+  $('impModeNew').onchange = () => {
+    $('impNewPane').hidden = false;
+    $('impOverPane').hidden = true;
+  };
+  $('impModeOver').onchange = () => {
+    $('impNewPane').hidden = true;
+    $('impOverPane').hidden = false;
+  };
+
+  // ---- 批量复制 ----
+  $('btnSelectAll').onclick = () => toggleSelectAll();
+  $('btnCopyTo').onclick = () => openCopyModal().catch((err) => toast(err.message, true));
+  $('copyCancel').onclick = () => { $('copyMask').hidden = true; };
+  $('copyOk').onclick = () => doCopy().catch((err) => toast(err.message, true));
+  $('copyTargetWs').onchange = () => fillCopyGroups().catch(() => {});
+  $('copyGroupSel').onchange = () => {
+    const isNew = $('copyGroupSel').value === '__new__';
+    $('copyGroupInputWrap').hidden = !isNew;
+    if (isNew) $('copyGroupInput').focus();
+  };
+
+  // 弹窗遮罩点击关闭（仅两个辅助弹窗，主弹窗保持原有行为）
+  $('importMask').addEventListener('click', (e) => {
+    if (e.target === $('importMask')) $('importMask').hidden = true;
+  });
+  $('copyMask').addEventListener('click', (e) => {
+    if (e.target === $('copyMask')) $('copyMask').hidden = true;
+  });
 
   $('btnPretty').onclick = () => {
     state.pretty = !state.pretty;

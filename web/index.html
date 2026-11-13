@@ -14,11 +14,22 @@
       <div class="brand">
         <span class="logo">◇</span>
         <span class="brand-name">接口工具</span>
+        <span class="ws-picker">
+          <select id="wsSwitcher" class="ws-select" title="切换工作空间"></select>
+          <button class="icon-btn" id="btnNewWorkspace" title="新建工作空间">＋</button>
+          <button class="icon-btn" id="btnWsMenu" title="空间管理（重命名 / 删除 / 导出全部）">⋯</button>
+          <div class="ws-menu" id="wsMenu" hidden>
+            <button class="ws-menu-item" data-wsact="rename">重命名当前空间</button>
+            <button class="ws-menu-item" data-wsact="delete">删除当前空间</button>
+            <div class="ws-menu-sep"></div>
+            <button class="ws-menu-item" data-wsact="exportAll">导出全部空间</button>
+          </div>
+        </span>
         <span class="brand-sub" id="dataDir" title="">数据目录</span>
       </div>
       <div class="topbar-actions">
         <button class="btn btn-primary" id="btnNew">＋ 新建接口</button>
-        <button class="btn" id="btnExport">导出备份</button>
+        <button class="btn" id="btnExport">导出当前空间</button>
         <button class="btn" id="btnImport">导入备份</button>
         <input type="file" id="fileInput" accept=".json" hidden />
       </div>
@@ -31,6 +42,11 @@
           <input type="search" id="search" placeholder="搜索接口名称 / 地址…" autocomplete="off" />
         </div>
         <div class="tree" id="tree"></div>
+        <div class="bulkbar" id="bulkBar">
+          <span class="bulk-count" id="bulkCount">已选 0 项</span>
+          <button class="link-btn" id="btnSelectAll">全选</button>
+          <button class="btn btn-sm" id="btnCopyTo" disabled>复制到其他空间</button>
+        </div>
         <div class="sidebar-foot" id="sidebarFoot"></div>
       </aside>
 
@@ -197,6 +213,49 @@
       <div class="modal-foot">
         <button class="btn" id="modalCancel">取消</button>
         <button class="btn btn-primary" id="modalOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入备份弹窗（双模式） -->
+  <div class="modal-mask" id="importMask" hidden>
+    <div class="modal">
+      <h3>导入备份</h3>
+      <div class="modal-body">
+        <div class="imp-modes">
+          <label class="imp-mode"><input type="radio" name="impMode" value="new" id="impModeNew" checked /> <span>新建工作空间</span></label>
+          <label class="imp-mode"><input type="radio" name="impMode" value="overwrite" id="impModeOver" /> <span>覆盖现有空间</span></label>
+        </div>
+        <div class="imp-pane" id="impNewPane">
+          <label class="field"><span>新空间名称</span><input type="text" id="impNewName" /></label>
+          <div class="hint-line">将新建一个独立工作空间并导入，不影响现有空间数据。</div>
+        </div>
+        <div class="imp-pane" id="impOverPane" hidden>
+          <label class="field"><span>目标空间</span><select id="impTargetWs"></select></label>
+          <div class="hint-line warn">将覆盖该空间的全部接口数据，其他空间不受影响。</div>
+        </div>
+        <div class="hint-line" id="impFileInfo"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="impCancel">取消</button>
+        <button class="btn btn-primary" id="impOk">开始导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 跨空间复制弹窗 -->
+  <div class="modal-mask" id="copyMask" hidden>
+    <div class="modal">
+      <h3>复制到其他空间</h3>
+      <div class="modal-body">
+        <div class="hint-line" id="copySummary">已选 0 项</div>
+        <label class="field"><span>目标空间</span><select id="copyTargetWs"></select></label>
+        <label class="field"><span>目标分组</span><select id="copyGroupSel"></select></label>
+        <label class="field" id="copyGroupInputWrap" hidden><span>新分组名</span><input type="text" id="copyGroupInput" placeholder="例如：用户服务" /></label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="copyCancel">取消</button>
+        <button class="btn btn-primary" id="copyOk">开始复制</button>
       </div>
     </div>
   </div>
