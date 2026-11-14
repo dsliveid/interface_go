@@ -4,7 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>接口工具</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14' fill='%234ec9b0'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
+  <!-- favicon 与 exe 图标同源（由 go run ./tools/genicon 统一生成）。
+       不要改回用 SVG <text> 字符画菱形：字形依赖字体度量、默认锚点在左边缘，
+       渲染到任务栏图标时会明显偏离画布中心。 -->
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/icon-16.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/icon-48.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>

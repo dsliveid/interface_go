@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -45,18 +46,18 @@ func (a *Activity) Alive(within time.Duration) bool {
 
 // Server 承载所有本地接口。
 type Server struct {
-	st      *store.Store
-	static  fs.FS
-	act     *Activity
-	onOpen  func() // 由托盘侧注入：重新拉起浏览器窗口
-	onQuit  func() // 由主流程注入：干净退出程序
+	st     *store.Store
+	static fs.FS
+	act    *Activity
+	onOpen func() // 由托盘侧注入：重新拉起浏览器窗口
+	onQuit func() // 由主流程注入：干净退出程序
 }
 
 // Options 注入桌面环境相关的回调，全部可为 nil（无 GUI 环境）。
 type Options struct {
-	Activity     *Activity  // 前端心跳记录器
-	OnOpenWindow func()     // 打开/聚焦主界面窗口
-	OnQuit       func()     // 退出程序（供「重复启动时选择退出已有实例」使用）
+	Activity     *Activity // 前端心跳记录器
+	OnOpenWindow func()    // 打开/聚焦主界面窗口
+	OnQuit       func()    // 退出程序（供「重复启动时选择退出已有实例」使用）
 }
 
 // New 构造路由。
@@ -102,8 +103,35 @@ func New(st *store.Store, static fs.FS, opt Options) http.Handler {
 	mux.HandleFunc("GET /api/export/all", s.exportAll)
 	mux.HandleFunc("POST /api/import", s.importData)
 
-	mux.Handle("/", http.FileServer(http.FS(static)))
+	mux.Handle("/", staticHandler(static))
 	return mux
+}
+
+// staticTypes 静态资源的显式 Content-Type。
+//
+// .ico 不在 Go 内建的 mime 表里（Windows 上还会去查注册表，结果不稳定），
+// 显式声明可避免浏览器按 octet-stream 处理导致 favicon 不显示；
+// 文本类统一带 charset，防止源码里的中文注释被按本地编码解析。
+var staticTypes = map[string]string{
+	".html":  "text/html; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".js":    "application/javascript; charset=utf-8",
+	".json":  "application/json; charset=utf-8",
+	".svg":   "image/svg+xml",
+	".ico":   "image/x-icon",
+	".png":   "image/png",
+	".woff2": "font/woff2",
+}
+
+// staticHandler 在 FileServer 之前补齐显式 Content-Type。
+func staticHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct, okType := staticTypes[strings.ToLower(path.Ext(r.URL.Path))]; okType {
+			w.Header().Set("Content-Type", ct)
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 type resp struct {

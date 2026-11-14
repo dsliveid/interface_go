@@ -1,8 +1,17 @@
-// genicon 生成程序图标 assets/app.ico。
+// genicon 生成程序图标（exe 资源与网页 favicon 同源）。
 //
 // 图标与页面头部品牌标识保持一致：深色面板底 + 绿色菱形（◇，--green #4ec9b0）。
 // 输出为多尺寸 ICO：16/24/32/48/64 用 32bpp BMP 条目（兼容所有 Windows 图标 API，
 // 托盘图标即取自其中的 32×32 条目），256 用 PNG 条目（Vista+ 支持，减小体积）。
+//
+// 一次执行同时产出四处（图案与几何布局完全一致，杜绝「exe 图标居中、任务栏图标偏」）：
+//
+//	assets/app.ico      exe 文件图标（经 tools/winres 打进 .syso）与托盘图标
+//	web/favicon.ico     网页图标（Chrome App 窗口 / 任务栏按钮即取它）
+//	web/icon-16.png     网页图标位图变体（16 / 32 / 48 / 180）
+//	web/icon-32.png
+//	web/icon-48.png
+//	web/icon-180.png
 //
 // 用法（在项目根目录）：
 //
@@ -13,7 +22,8 @@
 //	go run ./tools/winres
 //
 // 注意：winres 默认跳过 ICO 里的 PNG 压缩条目，避免资源节内出现高熵压缩块
-// （256×256 大图标想保留 PNG 条目时加 -keep-png）。
+// （256×256 大图标想保留 PNG 条目时加 -keep-png）。该策略只影响 .syso 打包，
+// 不影响网页直接取用的 web/favicon.ico。
 package main
 
 import (
@@ -41,6 +51,10 @@ var bmpSizes = []int{16, 24, 32, 48, 64}
 // pngSizes 使用 PNG 条目（Windows Vista+ 支持，用于资源管理器大图标）。
 var pngSizes = []int{256}
 
+// webPNGSizes 另存为网页 favicon 的 PNG 变体尺寸。
+// 32 供浏览器标签页/任务栏小图标，48 供高 DPI 任务栏，180 供移动端主屏图标。
+var webPNGSizes = []int{16, 32, 48, 180}
+
 const supersample = 4 // 超采样倍数，用于抗锯齿
 
 func main() {
@@ -63,13 +77,39 @@ func main() {
 		entries = append(entries, entry{size: s, data: buf.Bytes()})
 	}
 
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		log.Fatalf("创建目录失败：%v", err)
-	}
-	if err := os.WriteFile(out, buildICO(entries), 0o644); err != nil {
+	ico := buildICO(entries)
+	if err := writeFile(out, ico); err != nil {
 		log.Fatalf("写入 %s 失败：%v", out, err)
 	}
 	fmt.Printf("已生成 %s（%d 个尺寸：%v BMP + %v PNG）\n", out, len(entries), bmpSizes, pngSizes)
+
+	// 网页图标与 exe 图标同源：同一份 ICO 直接给浏览器，再补几张纯 PNG 变体。
+	webDir := "web"
+	if err := writeFile(filepath.Join(webDir, "favicon.ico"), ico); err != nil {
+		log.Fatalf("写入 %s 失败：%v", filepath.Join(webDir, "favicon.ico"), err)
+	}
+	fmt.Printf("已生成 %s\n", filepath.Join(webDir, "favicon.ico"))
+
+	for _, s := range webPNGSizes {
+		img := render(s)
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, img); err != nil {
+			log.Fatalf("PNG 编码失败：%v", err)
+		}
+		name := filepath.Join(webDir, fmt.Sprintf("icon-%d.png", s))
+		if err := writeFile(name, buf.Bytes()); err != nil {
+			log.Fatalf("写入 %s 失败：%v", name, err)
+		}
+		fmt.Printf("已生成 %s\n", name)
+	}
+}
+
+// writeFile 创建父目录后写入文件。
+func writeFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 type entry struct {
@@ -189,13 +229,13 @@ func encodeBMP(img *image.NRGBA) []byte {
 	var buf bytes.Buffer
 	// BITMAPINFOHEADER
 	header := make([]byte, 40)
-	binary.LittleEndian.PutUint32(header[0:], 40)              // biSize
-	binary.LittleEndian.PutUint32(header[4:], uint32(w))       // biWidth
-	binary.LittleEndian.PutUint32(header[8:], uint32(h*2))     // biHeight（XOR + AND 两张图）
-	binary.LittleEndian.PutUint16(header[12:], 1)              // biPlanes
-	binary.LittleEndian.PutUint16(header[14:], 32)             // biBitCount
-	binary.LittleEndian.PutUint32(header[16:], 0)              // biCompression = BI_RGB
-	binary.LittleEndian.PutUint32(header[20:], uint32(w*h*4))  // biSizeImage
+	binary.LittleEndian.PutUint32(header[0:], 40)             // biSize
+	binary.LittleEndian.PutUint32(header[4:], uint32(w))      // biWidth
+	binary.LittleEndian.PutUint32(header[8:], uint32(h*2))    // biHeight（XOR + AND 两张图）
+	binary.LittleEndian.PutUint16(header[12:], 1)             // biPlanes
+	binary.LittleEndian.PutUint16(header[14:], 32)            // biBitCount
+	binary.LittleEndian.PutUint32(header[16:], 0)             // biCompression = BI_RGB
+	binary.LittleEndian.PutUint32(header[20:], uint32(w*h*4)) // biSizeImage
 	buf.Write(header)
 
 	// XOR 位图：BGRA，自下而上
@@ -225,14 +265,14 @@ func buildICO(entries []entry) []byte {
 		if e.size >= 256 {
 			dim = 0 // 256 在 ICO 目录中用 0 表示
 		}
-		buf.WriteByte(dim)              // bWidth
-		buf.WriteByte(dim)              // bHeight
-		buf.WriteByte(0)                // bColorCount
-		buf.WriteByte(0)                // bReserved
-		binary.Write(&buf, binary.LittleEndian, uint16(1))            // wPlanes
-		binary.Write(&buf, binary.LittleEndian, uint16(32))           // wBitCount
-		binary.Write(&buf, binary.LittleEndian, uint32(len(e.data)))  // dwBytesInRes
-		binary.Write(&buf, binary.LittleEndian, uint32(offset))       // dwImageOffset
+		buf.WriteByte(dim)                                           // bWidth
+		buf.WriteByte(dim)                                           // bHeight
+		buf.WriteByte(0)                                             // bColorCount
+		buf.WriteByte(0)                                             // bReserved
+		binary.Write(&buf, binary.LittleEndian, uint16(1))           // wPlanes
+		binary.Write(&buf, binary.LittleEndian, uint16(32))          // wBitCount
+		binary.Write(&buf, binary.LittleEndian, uint32(len(e.data))) // dwBytesInRes
+		binary.Write(&buf, binary.LittleEndian, uint32(offset))      // dwImageOffset
 		offset += len(e.data)
 	}
 	for _, e := range entries {

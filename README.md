@@ -226,7 +226,7 @@ sys_other.go               非 Windows 平台的 Win32 stub
 messagebox_windows.go      原生错误弹窗 / 「是·否」确认框
 assets/app.ico             程序图标（深色底 + 绿色菱形，与页面头部品牌标识一致）
 rsrc_windows_amd64.syso    exe 资源对象：图标 + 版本信息 + 应用清单（由 tools/winres 生成）
-tools/genicon/main.go      图标生成器（go run ./tools/genicon 可重新生成 app.ico）
+tools/genicon/main.go      图标生成器（一次生成 assets/app.ico + web/favicon.ico + web/icon-*.png）
 tools/winres/main.go       资源生成器（图标/VERSIONINFO/MANIFEST 打包成 .syso）+ PE 头修正
 tools/winres/coff.go       COFF 对象打包与 PE 时间戳/校验和计算
 run.sh                     开发期启动脚本（go run，参数透传）
